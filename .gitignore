@@ -1,1 +1,50 @@
 *.pt
+*.json
+*.jsonl
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*$py.class
+
+# 分发 / 构建
+build/
+dist/
+*.egg-info/
+.eggs/
+*.egg
+*.log
+
+# 单元测试 / 覆盖率
+.coverage
+.coverage.*
+.cache/
+htmlcov/
+.tox/
+.nox/
+.pytest_cache/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb~
+
+# ---- 虚拟环境 (uv / venv) ----
+.venv/
+venv/
+.env/
+env/
+
+# ---- 编辑器 / IDE ----
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ---- OS 相关 ----
+.DS_Store
+Thumbs.db
+
+# ---- 临时文件 ----
+*.tmp
+*.temp
+~$*
