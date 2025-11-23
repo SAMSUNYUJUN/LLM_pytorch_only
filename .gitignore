@@ -1,6 +1,7 @@
 *.pt
 *.json
 *.jsonl
+*.parquet
 
 # ---- Python ----
 __pycache__/
