@@ -52,6 +52,7 @@ class DistAdamW(torch.optim.Optimizer):
     """
 
     # param_groups是矩阵参数和学习率[{"params": [W_q, W_k, ...], "lr": 0.02, ...},  {"params": [embedding], "lr": 0.2, ...},...]
+    # 注意param_groups的第0维要是能除以world_size的，因为要按world size切分
     def __init__(self, param_groups, lr: float = 1e-3, betas: tuple[float, float] = (0.9, 0.999), eps: float = 1e-8, weight_decay: float = 0.01):
         defaults = dict(lr=lr, betas=betas, eps=eps, weight_decay=weight_decay)
         super().__init__(param_groups, defaults)
@@ -77,7 +78,7 @@ class DistAdamW(torch.optim.Optimizer):
         # 便利param_groups里的每个参数组
         # 这里有一个异步计算，可以先循环把所有的 reduce_scatter_tensor 操作都发起，然后再等它们完成
         for group in self.param_groups:
-            # 得到该组的参数列表
+            # 得到该组的参数列表，例如W_q, W_k, W_v...
             params: list[Tensor] = group["params"]
             # 便利该组的每个参数
             for base_i in range(len(params)):
