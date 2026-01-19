@@ -71,6 +71,8 @@ class CausalSelfAttention(nn.Module):
         self.c_k = nn.Linear(self.n_embd, self.n_kv_head * self.head_dim, bias=False)
         self.c_v = nn.Linear(self.n_embd, self.n_kv_head * self.head_dim, bias=False)
         self.c_proj = nn.Linear(self.n_embd, self.n_embd, bias=False)
+        # qwen gated attention
+        self.c_gate = nn.Linear(self.n_embd, self.n_head * self.head_dim, bias=False)
 
     def forward(self, x, cos_sin, kv_cache):
         B, T, C = x.size()
@@ -123,6 +125,12 @@ class CausalSelfAttention(nn.Module):
             # Then, causal attention within this chunk
             attn_mask[:, prefix_len:] = torch.tril(torch.ones((Tq, Tq), dtype=torch.bool, device=q.device))
             y = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, enable_gqa=enable_gqa)
+
+        # qwen gated attention
+        gate = torch.sigmoid(self.c_gate(x))                    # (B, T, H*D)
+        gate = gate.view(B, T, self.n_head, self.head_dim)      # (B, T, H, D)
+        gate = gate.transpose(1, 2)                              # (B, H, T, D)
+        y = y * gate                                             # (B, H, T, D)
 
         # Re-assemble the heads side by side and project back to residual stream
         y = y.transpose(1, 2).contiguous().view(B, T, -1)

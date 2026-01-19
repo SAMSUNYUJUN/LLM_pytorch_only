@@ -11,15 +11,22 @@ Notes:
 The whole thing is made as efficient as possible.
 """
 
+import os
+import sys
 import torch
 import torch.nn.functional as F
 import signal
 import warnings
 from contextlib import contextmanager
 from collections import deque
+from contextlib import nullcontext 
+
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../.."))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
 from app.modules.utils.utils import compute_init, autodetect_device_type
 from app.modules.utils.checkpoint_manager import load_model
-from contextlib import nullcontext 
 
 # -----------------------------------------------------------------------------
 # Calculator tool helpers

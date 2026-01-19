@@ -4,10 +4,17 @@ New and upgraded chat mode because a lot of the code has changed since the last 
 Intended to be run single GPU only atm:
 python -m scripts.chat_cli -i mid
 """
+import os
+import sys
 import argparse
 import torch
-from app.modules.utils.utils import compute_init, autodetect_device_type
 from contextlib import nullcontext
+
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../.."))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
+from app.modules.utils.utils import compute_init, autodetect_device_type
 from app.modules.model.engine import Engine
 from app.modules.utils.checkpoint_manager import load_model
 

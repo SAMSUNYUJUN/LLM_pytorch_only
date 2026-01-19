@@ -1,5 +1,5 @@
 """
-torchrun --nproc_per_node=2 pretrain/pretrain.py
+torchrun --nproc_per_node=4 app/modules/pretrain/pretrain.py
 """
 
 import os
@@ -7,24 +7,51 @@ import sys
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 import time
 import torch
-from app.modules.model.gpt import GPT, GPTConfig
-from app.modules.model.dataloader import (
-    tokenizing_distributed_data_loader,
-    tokenizing_distributed_data_loader_with_state,
-)
-from app.modules.utils.utils import (
-    get_base_dir,
-)
-from app.modules.tokenizer.tokenizer import get_tokenizer, get_token_bytes
 import json
-from app.modules.model.loss_eval import evaluate_bpb
 import torch.distributed as dist
+
+try:
+    from ..model.gpt import GPT, GPTConfig
+    from ..model.dataloader import (
+        tokenizing_distributed_data_loader,
+        tokenizing_distributed_data_loader_with_state,
+    )
+    from ..utils.utils import (
+        get_base_dir,
+    )
+    from ..tokenizer.tokenizer import get_tokenizer, get_token_bytes
+    from ..model.loss_eval import evaluate_bpb
+except ImportError:
+    from pathlib import Path
+
+    project_root = Path(__file__).resolve().parents[3]
+    if str(project_root) not in sys.path:
+        sys.path.insert(0, str(project_root))
+    from app.modules.model.gpt import GPT, GPTConfig
+    from app.modules.model.dataloader import (
+        tokenizing_distributed_data_loader,
+        tokenizing_distributed_data_loader_with_state,
+    )
+    from app.modules.utils.utils import (
+        get_base_dir,
+    )
+    from app.modules.tokenizer.tokenizer import get_tokenizer, get_token_bytes
+    from app.modules.model.loss_eval import evaluate_bpb
+
+def rank0_print(*args, **kwargs):
+    # dist 还没 init 或单卡时，也允许正常打印
+    if (not dist.is_available()) or (not dist.is_initialized()):
+        print(*args, **kwargs)
+        return
+
+    if dist.get_rank() == 0:
+        print(*args, **kwargs)
 
 # ==========================
 # 固定超参（可按需自己改）
 # ==========================
 
-DEPTH = 20               # Transformer 层数
+DEPTH = 32               # Transformer 层数
 MAX_SEQ_LEN = 2048       # 上下文长度
 DEVICE_BATCH_SIZE = 16   # 单卡 batch（按内存调）
 TOTAL_BATCH_SIZE = 524288  # 每个 step（做一次 optimizer.step 前）全局累计看到的 token 总数
@@ -77,7 +104,7 @@ get_max_memory = torch.cuda.max_memory_allocated
 tokenizer = get_tokenizer()
 token_bytes = get_token_bytes(device=device)
 vocab_size = tokenizer.get_vocab_size()
-print(f"Vocab size: {vocab_size:,}")
+rank0_print(f"Vocab size: {vocab_size:,}")
 
 # ==========================
 # 模型结构超参（跟原 base_train 一致）
@@ -88,10 +115,10 @@ model_dim = DEPTH * 64  # aspect ratio 64
 num_heads = max(1, (model_dim + 127) // 128)  # head dim 128
 num_kv_heads = num_heads  # 关闭 GQA（1:1）
 
-print(f"num_layers: {num_layers}")
-print(f"model_dim: {model_dim}")
-print(f"num_heads: {num_heads}")
-print(f"num_kv_heads: {num_kv_heads}")
+rank0_print(f"num_layers: {num_layers}")
+rank0_print(f"model_dim: {model_dim}")
+rank0_print(f"num_heads: {num_heads}")
+rank0_print(f"num_kv_heads: {num_kv_heads}")
 
 # ==========================
 # batch / grad accumulation
@@ -105,11 +132,11 @@ assert TOTAL_BATCH_SIZE % world_tokens_per_fwdbwd == 0
 # 梯度累积步数（多少个micro-step算一个大的step） = 一次step需要的tokens数量 / （一次world forward和backword的token数）
 grad_accum_steps = TOTAL_BATCH_SIZE // world_tokens_per_fwdbwd
 
-print(
+rank0_print(
     f"每次forward/backward的总token数: {DEVICE_BATCH_SIZE} x {MAX_SEQ_LEN} = {tokens_per_fwdbwd:,}"
 )
-print(f"一次world forward和backword的token数: {world_tokens_per_fwdbwd:,}")
-print(
+rank0_print(f"一次world forward和backword的token数: {world_tokens_per_fwdbwd:,}")
+rank0_print(
     f"每个 step（做一次 optimizer.step 前）全局累计看到的 token 总数 {TOTAL_BATCH_SIZE:,} => gradient accumulation steps: {grad_accum_steps}"
 )
 
@@ -137,9 +164,9 @@ orig_model = model  # 保存未 compile 的版本，用来存权重
 model = torch.compile(model, dynamic=False)
 
 num_params = sum(p.numel() for p in model.parameters())
-print(f"Number of parameters: {num_params:,}")
+rank0_print(f"Number of parameters: {num_params:,}")
 num_flops_per_token = model.estimate_flops()
-print(f"Estimated FLOPs per token: {num_flops_per_token:e}")
+rank0_print(f"Estimated FLOPs per token: {num_flops_per_token:e}")
 
 # ==========================
 # 计算训练步数（用 data:param ratio）
@@ -153,12 +180,12 @@ assert num_iterations > 0
 # 真正会训练的总 token 数 = 每步 token × step 数
 total_tokens = TOTAL_BATCH_SIZE * num_iterations
 
-print(f"Calculated number of iterations: {num_iterations:,}")
-print(f"Total training tokens: {total_tokens:,}")
-print(
+rank0_print(f"Calculated number of iterations: {num_iterations:,}")
+rank0_print(f"Total training tokens: {total_tokens:,}")
+rank0_print(
     f"Tokens : Params ratio: {TOTAL_BATCH_SIZE * num_iterations / num_params:.2f}"
 )
-print(
+rank0_print(
     f"Total training FLOPs estimate: {num_flops_per_token * total_tokens:e}"
 )
 
@@ -256,7 +283,7 @@ while step < max_steps:
         eval_steps = EVAL_TOKENS // (DEVICE_BATCH_SIZE * MAX_SEQ_LEN * world_size)
         with autocast_ctx:
             val_bpb = evaluate_bpb(model, val_loader, eval_steps, token_bytes)
-        print(f"[Eval] Step {step:05d} | Validation bpb: {val_bpb:.4f}")
+        rank0_print(f"[Eval] Step {step:05d} | Validation bpb: {val_bpb:.4f}")
         min_val_bpb = min(min_val_bpb, val_bpb)
         model.train()
 
@@ -318,7 +345,7 @@ while step < max_steps:
         total_training_time += dt
 
     grad_str = f" | grad_norm: {grad_norm:.4f}" if grad_norm is not None else ""
-    print(
+    rank0_print(
         f"step {step:05d}/{num_iterations:05d} ({pct_done:5.2f}%)"
         f" | loss: {debiased_smooth_loss:.6f}"
         f"{grad_str}"
@@ -341,17 +368,17 @@ def save_checkpoint(checkpoint_dir, step, model_data, optimizer_data, meta_data,
         # Save the model state parameters
         model_path = os.path.join(checkpoint_dir, f"model_{step:06d}.pt")
         torch.save(model_data, model_path)
-        print(f"Saved model parameters to: {model_path}")
+        rank0_print(f"Saved model parameters to: {model_path}")
         # Save the metadata dict as json
         meta_path = os.path.join(checkpoint_dir, f"meta_{step:06d}.json")
         with open(meta_path, "w", encoding="utf-8") as f:
             json.dump(meta_data, f, indent=2)
-        print(f"Saved metadata to: {meta_path}")
+        rank0_print(f"Saved metadata to: {meta_path}")
     # Note that optimizer state is sharded across ranks, so each rank must save its own.
     if optimizer_data is not None:
         optimizer_path = os.path.join(checkpoint_dir, f"optim_{step:06d}_rank{rank:d}.pt")
         torch.save(optimizer_data, optimizer_path)
-        print(f"Saved optimizer state to: {optimizer_path}")
+        rank0_print(f"Saved optimizer state to: {optimizer_path}")
 
 
 model.eval()
@@ -359,7 +386,7 @@ val_loader = build_val_loader()
 eval_steps = EVAL_TOKENS // (DEVICE_BATCH_SIZE * MAX_SEQ_LEN * world_size)
 with autocast_ctx:
     val_bpb = evaluate_bpb(model, val_loader, eval_steps, token_bytes)
-print(f"[Final Eval] Step {step:05d} | Validation bpb: {val_bpb:.4f}")
+rank0_print(f"[Final Eval] Step {step:05d} | Validation bpb: {val_bpb:.4f}")
 min_val_bpb = min(min_val_bpb, val_bpb)
 
 
@@ -398,8 +425,8 @@ save_checkpoint(
 # 训练结束总结
 # ==========================
 
-print(f"Peak memory usage: {get_max_memory() / 1024 / 1024:.2f}MiB")
-print(f"Total training time: {total_training_time/60:.2f}m")
-print(f"Minimum validation bpb: {min_val_bpb:.4f}")
+rank0_print(f"Peak memory usage: {get_max_memory() / 1024 / 1024:.2f}MiB")
+rank0_print(f"Total training time: {total_training_time/60:.2f}m")
+rank0_print(f"Minimum validation bpb: {min_val_bpb:.4f}")
 
 dist.destroy_process_group()

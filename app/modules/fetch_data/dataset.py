@@ -15,7 +15,17 @@ import time
 import requests
 import pyarrow.parquet as pq
 from multiprocessing import Pool
-from app.modules.utils.utils import get_base_dir as get_app_base_dir
+
+try:
+    from ..utils.utils import get_base_dir as get_app_base_dir
+except ImportError:
+    import sys
+    from pathlib import Path
+
+    project_root = Path(__file__).resolve().parents[3]
+    if str(project_root) not in sys.path:
+        sys.path.insert(0, str(project_root))
+    from app.modules.utils.utils import get_base_dir as get_app_base_dir
 
 # -----------------------------------------------------------------------------
 # The specifics of the current pretraining dataset
@@ -26,7 +36,10 @@ def get_base_dir():
 
     
 # The URL on the internet where the data is hosted and downloaded from on demand
-BASE_URL = "https://huggingface.co/datasets/karpathy/fineweb-edu-100b-shuffle/resolve/main"
+# Can be overridden via environment variable DATASET_BASE_URL (e.g. https://hf-mirror.com/...) 
+BASE_URL = "https://hf-mirror.com/datasets/karpathy/fineweb-edu-100b-shuffle/resolve/main"
+#"https://huggingface.co/datasets/karpathy/fineweb-edu-100b-shuffle/resolve/main",
+
 MAX_SHARD = 1822 # the last datashard is shard_01822.parquet
 index_to_filename = lambda index: f"shard_{index:05d}.parquet" # format of the filenames
 base_dir = get_base_dir()

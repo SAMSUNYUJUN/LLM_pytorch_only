@@ -10,6 +10,7 @@ torchrun --nproc_per_node=8 -m scripts.base_eval
 The script will print the CORE metric to the console.
 """
 import os
+import sys
 import csv
 import time
 import json
@@ -21,6 +22,10 @@ import tempfile
 from contextlib import nullcontext
 
 import torch
+
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../.."))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 
 from app.modules.utils.utils import compute_init, compute_cleanup, print0, get_base_dir, autodetect_device_type, download_file_with_lock
 from app.modules.tokenizer.tokenizer import HuggingFaceTokenizer
