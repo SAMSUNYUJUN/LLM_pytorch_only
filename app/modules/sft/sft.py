@@ -2,7 +2,7 @@
 Supervised fine-tuning (SFT) for the LLM_pytorch_only project.
 
 Usage (multi-GPU):
-    torchrun --standalone --nproc_per_node=4 app/modules/sft/sft.py --run sft_d32
+CUDA_VISIBLE_DEVICES=4,5,6,7 torchrun --standalone --nproc_per_node=4 app/modules/sft/sft.py --device-type cuda  --identity-jsonl app/data/sft/jsonl/identity_conversations.jsonl --total-batch-size 524288 --device-batch-size 16
 
 Usage (single GPU for smoke tests):
     python app/modules/sft/sft.py --device-type cuda --device-batch-size 2 --total-batch-size 8192 --num-iterations 20
@@ -345,7 +345,7 @@ class SimpleSpelling(Task):
 
 parser = argparse.ArgumentParser(description="Supervised fine-tuning (SFT) the model")
 # Logging / bookkeeping
-parser.add_argument("--run", type=str, default="dummy", help="Run name (dummy = disable external logging)")
+parser.add_argument("--run-path", type=str, default="d32", help="Run name (dummy = disable external logging)")
 parser.add_argument("--dry-run", action="store_true", help="Skip checkpoint write (for smoke tests)")
 # Runtime
 parser.add_argument("--device-type", type=str, default="", choices=["", "cuda", "cpu", "mps"], help="cuda|cpu|mps (empty = autodetect)")
@@ -620,8 +620,8 @@ def get_muon_momentum(it: int) -> float:
 # Checkpoint dir
 # -----------------------------------------------------------------------------
 
-ckpt_root = os.path.join(base_dir, "weights", "sft", "checkpoints")
-output_dirname = args.run
+ckpt_root = os.path.join(base_dir, "weights", "sft")
+output_dirname = args.run_path
 checkpoint_dir = os.path.join(ckpt_root, output_dirname)
 if ddp_rank == 0:
     os.makedirs(checkpoint_dir, exist_ok=True)
