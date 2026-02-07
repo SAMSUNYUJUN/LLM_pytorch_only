@@ -1,8 +1,8 @@
 """
-New and upgraded chat mode because a lot of the code has changed since the last one.
+python -m app.modules.chat \
+  --ckpt-relpath base_checkpoints/d32/model_076800.pt \
+  --device
 
-Intended to be run single GPU only atm:
-python -m scripts.chat_cli -i mid
 """
 import os
 import sys
