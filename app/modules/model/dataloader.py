@@ -25,32 +25,63 @@ def tokenizing_distributed_data_loader_with_state(B, T, split, tokenizer_threads
     # infinite iterator over document batches (list of text strings)
     ddp, ddp_rank, ddp_local_rank, ddp_world_size = get_dist_info()
     def document_batches():
+        # 一个parquet文件中有多个row group，每个row group包含多行文本数据。
         parquet_paths = list_parquet_files()
         parquet_paths = parquet_paths[:-1] if split == "train" else parquet_paths[-1:]
+
+        # checkpoint 里记录的“上次训练中断的大致位置”
         resume_pq_idx = resume_state_dict["pq_idx"] if resume_state_dict is not None else 0
         resume_rg_idx = resume_state_dict["rg_idx"] if resume_state_dict is not None else None
-        pq_idx = resume_pq_idx # we kick off parquet files at the resume index (or by default just 0)
-        while True: # iterate infinitely (multi-epoch)
-            while pq_idx < len(parquet_paths): # iterate over all parquet files
+
+        # 本次“重启训练”里的第一圈，用 resume；后面的圈就当正常从 0 开始
+        first_pass = True
+
+        while True:  # 无限 epoch / 无限 pass
+            # 本次 pass 的起始文件：
+            #   - 第一次 pass：从 resume_pq_idx 开始（接着上次中断处往后走）
+            #   - 后续 pass：从 0 开始（完整扫一圈数据）
+            pq_idx = resume_pq_idx if first_pass else 0
+
+            while pq_idx < len(parquet_paths):  # 遍历本轮要看的所有 parquet 文件
                 filepath = parquet_paths[pq_idx]
                 pf = pq.ParquetFile(filepath)
-                # Start from resume point if resuming on same file, otherwise from DDP rank
-                # I know this state resumption is a little bit tricky and a little bit hacky... sigh.
-                if resume_rg_idx is not None:
-                    base_idx = resume_rg_idx // ddp_world_size # in units of ddp_world_size
-                    base_idx += 1 # advance by 1 so that we definitely don't repeat data after resuming
+
+                # 只有在“第一次 pass 且在恢复的那个文件上”才用 resume_rg_idx
+                if first_pass and (resume_rg_idx is not None) and (pq_idx == resume_pq_idx):
+                    # resume_rg_idx 是“上次看到的 row group index”，我们跳到它后面的那块
+                    base_idx = resume_rg_idx // ddp_world_size
+                    base_idx += 1  # +1 保证不重复上次那块
                     rg_idx = base_idx * ddp_world_size + ddp_rank
-                    resume_rg_idx = None # set to None as we only want to do this a single time
+
+                    # 如果这一跳直接跳出这个文件的 row group 范围，
+                    # 说明本 rank 在这个文件里已经没数据可读了，直接下一个文件
+                    if rg_idx >= pf.num_row_groups:
+                        pq_idx += 1
+                        continue
+
+                    # 用过一次 resume_rg_idx 之后就作废，后面不再用
+                    resume_rg_idx = None
                 else:
+                    # 正常 DDP 切分：每个 rank 从自己的 ddp_rank 起步，间隔 world_size
                     rg_idx = ddp_rank
+
+                # 遍历当前 parquet 文件中属于本 rank 的所有 row group
                 while rg_idx < pf.num_row_groups:
                     rg = pf.read_row_group(rg_idx)
-                    batch = rg.column('text').to_pylist() # each batch is a parquet group, e.g. 1024 rows
-                    # the tokenizer encode might want to go in even smaller batches, e.g. 128 rows
+                    batch = rg.column("text").to_pylist()  # 每个 row group 是很多行 text
+
+                    # 再按 tokenizer_batch_size 切成更小的 doc batch
                     for i in range(0, len(batch), tokenizer_batch_size):
-                        yield batch[i:i+tokenizer_batch_size], (pq_idx, rg_idx)
-                    rg_idx += ddp_world_size # advance to the next row group (in DDP)
-                pq_idx += 1 # advance to the next parquet file
+                        yield batch[i : i + tokenizer_batch_size], (pq_idx, rg_idx)
+
+                    # 下一个属于本 rank 的 row group（交错分配）
+                    rg_idx += ddp_world_size
+
+                # 当前 parquet 文件读完，切到下一个文件
+                pq_idx += 1
+
+            # 第一圈跑完之后，以后就不再用 resume_pq_idx/resume_rg_idx 了
+            first_pass = False
     batches = document_batches()
 
     # Now emit batches of tokens.

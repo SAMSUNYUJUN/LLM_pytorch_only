@@ -53,7 +53,7 @@ def load_checkpoint(checkpoint_dir, step, device, load_optimizer=False, rank=0):
     return model_data, optimizer_data, meta_data
 
 
-def build_model(checkpoint_dir, step, device, phase):
+def build_model(checkpoint_dir, step, device, phase, allow_missing_c_gate=False):
     """
     A bunch of repetitive code to build a model from a given checkpoint.
     Returns:
@@ -79,7 +79,18 @@ def build_model(checkpoint_dir, step, device, phase):
     # Load the model state
     model.to_empty(device=device)
     model.init_weights() # note: this is dumb, but we need to init the rotary embeddings. TODO: fix model re-init
-    model.load_state_dict(model_data, strict=True, assign=True)
+    try:
+        model.load_state_dict(model_data, strict=True, assign=True)
+    except RuntimeError as e:
+        msg = str(e)
+        if allow_missing_c_gate and "c_gate" in msg:
+            state = model.state_dict()
+            missing = [k for k in state.keys() if "c_gate.weight" in k and k not in model_data]
+            for k in missing:
+                model_data[k] = torch.zeros_like(state[k])
+            model.load_state_dict(model_data, strict=False, assign=True)
+        else:
+            raise
     # Put the model in the right training phase / mode
     if phase == "eval":
         model.eval()

@@ -44,6 +44,7 @@ env/
 # ---- OS 相关 ----
 .DS_Store
 Thumbs.db
+/app/data
 
 # ---- 临时文件 ----
 *.tmp
