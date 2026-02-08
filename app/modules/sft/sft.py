@@ -1,11 +1,21 @@
 """
 Supervised fine-tuning (SFT) for the LLM_pytorch_only project.
 
-Usage (multi-GPU):
-CUDA_VISIBLE_DEVICES=4,5,6,7 torchrun --standalone --nproc_per_node=4 app/modules/sft/sft.py --device-type cuda  --identity-jsonl app/data/sft/jsonl/identity_conversations.jsonl --total-batch-size 524288 --device-batch-size 16
+示例：
+1) 多卡全量训练一轮（默认 num_iterations=-1 会跑满一轮数据）  
+   CUDA_VISIBLE_DEVICES=4,5,6,7 torchrun --standalone --nproc_per_node=4 \\
+   app/modules/sft/sft.py \\
+     --device-type cuda \\
+     --identity-jsonl app/data/sft/jsonl/identity_conversations.jsonl \\
+     --total-batch-size 524288 --device-batch-size 16
 
-Usage (single GPU for smoke tests):
-    python app/modules/sft/sft.py --device-type cuda --device-batch-size 2 --total-batch-size 8192 --num-iterations 20
+2) 单卡冒烟跑 20 步：  
+   python app/modules/sft/sft.py --device-type cuda --device-batch-size 2 --total-batch-size 8192 --num-iterations 20
+
+3) 每 400 步保存一次并可断点续训：  
+   python app/modules/sft/sft.py --device-type cuda --run-path my_run --save-every 400
+   # 中断后恢复  
+   python app/modules/sft/sft.py --device-type cuda --run-path my_run --resume
 """
 
 import os
@@ -39,6 +49,7 @@ try:
         build_model,
         find_last_step,
         find_largest_model,
+        load_checkpoint,
         save_checkpoint,
     )
     from ..tokenizer.tokenizer import get_tokenizer, get_token_bytes
@@ -60,6 +71,7 @@ except ImportError:
         build_model,
         find_last_step,
         find_largest_model,
+        load_checkpoint,
         save_checkpoint,
     )
     from app.modules.tokenizer.tokenizer import get_tokenizer, get_token_bytes
@@ -347,6 +359,8 @@ parser = argparse.ArgumentParser(description="Supervised fine-tuning (SFT) the m
 # Logging / bookkeeping
 parser.add_argument("--run-path", type=str, default="d32", help="Run name (dummy = disable external logging)")
 parser.add_argument("--dry-run", action="store_true", help="Skip checkpoint write (for smoke tests)")
+parser.add_argument("--resume", action="store_true", help="Resume training from latest checkpoint in run-path")
+parser.add_argument("--resume-step", type=int, default=None, help="Resume from a specific checkpoint step (overrides --resume)")
 # Runtime
 parser.add_argument("--device-type", type=str, default="", choices=["", "cuda", "cpu", "mps"], help="cuda|cpu|mps (empty = autodetect)")
 parser.add_argument("--dtype", type=str, default="bfloat16", choices=["float32", "bfloat16"])
@@ -355,6 +369,7 @@ parser.add_argument("--model-tag", type=str, default=None, help="Base checkpoint
 parser.add_argument("--model-step", type=int, default=None, help="Step to load (default: latest in the tag dir)")
 # Training horizon
 parser.add_argument("--num-iterations", type=int, default=-1, help="Number of optimizer steps (-1 = one epoch over train mix)")
+parser.add_argument("--save-every", type=int, default=400, help="Checkpoint every N steps (model + optimizer)")
 # Batch sizes
 parser.add_argument("--max-seq-len", type=int, default=2048, help="Max context length")
 parser.add_argument("--device-batch-size", type=int, default=32, help="Per-device batch size")
@@ -523,10 +538,10 @@ def sft_data_generator(split: str, state: Dict[str, Any], buffer_size: int = 100
     bos_token = tokenizer.get_bos_token_id()
 
     conv_buffer: List[Tuple[List[int], List[int]]] = []
-    cursor = ddp_rank  # stagger across ranks
-    consumed = ddp_rank
-    epoch = 1
-    it = 0
+    cursor = state.get("cursor", ddp_rank)  # stagger across ranks
+    consumed = state.get("consumed", ddp_rank)
+    epoch = state.get("epoch", 1)
+    it = state.get("it", 0)
 
     def refill_buffer():
         nonlocal cursor, epoch
@@ -576,6 +591,10 @@ def sft_data_generator(split: str, state: Dict[str, Any], buffer_size: int = 100
 
         # Update progress info (train only)
         it += 1
+        state["cursor"] = cursor
+        state["consumed"] = consumed
+        state["epoch"] = epoch
+        state["it"] = it
         if split == "train":
             state["current_epoch"] = epoch
             if args.num_iterations > 0:
@@ -595,13 +614,6 @@ def sft_data_generator(split: str, state: Dict[str, Any], buffer_size: int = 100
         # mask: supervise only where mask > 0, ignore others (0 or -1)
         targets = torch.where(target_mask > 0, targets, torch.full_like(targets, -1))
         yield inputs, targets
-
-
-train_state = {"last_step": False, "approx_progress": 0.0, "current_epoch": 1}
-train_loader = sft_data_generator("train", state=train_state)
-build_val_loader = lambda: sft_data_generator("val", state={"last_step": False, "approx_progress": 0.0, "current_epoch": 1})
-x, y = next(train_loader)  # prefetch first batch
-
 # -----------------------------------------------------------------------------
 # LR & momentum schedule (match nanochat chat_sft)
 # -----------------------------------------------------------------------------
@@ -629,13 +641,81 @@ if ddp:
     dist.barrier()
 
 # -----------------------------------------------------------------------------
-# Training loop
+# Resume logic and dataloaders
 # -----------------------------------------------------------------------------
 
-step = 0
-min_val_bpb = float("inf")
-smooth_train_loss = 0.0
-total_training_time = 0.0
+resume_step = None
+loaded_train_state: Dict[str, Any] = {}
+last_val_bpb = None
+
+if args.resume or args.resume_step is not None:
+    if not os.path.isdir(checkpoint_dir):
+        raise FileNotFoundError(f"Checkpoint directory not found for resume: {checkpoint_dir}")
+    resume_step = args.resume_step if args.resume_step is not None else find_last_step(checkpoint_dir)
+    model_data, optimizer_data, meta_data = load_checkpoint(
+        checkpoint_dir, resume_step, device, load_optimizer=True, rank=ddp_rank
+    )
+    orig_model.load_state_dict(model_data, strict=True)
+    if optimizer_data is not None:
+        assert len(optimizer_data) == len(optimizers), "Optimizer count mismatch during resume"
+        for opt, state in zip(optimizers, optimizer_data):
+            opt.load_state_dict(state)
+    min_val_bpb = meta_data.get("min_val_bpb", float("inf"))
+    last_val_bpb = meta_data.get("val_bpb", None)
+    loop_state = meta_data.get("loop_state", {})
+    smooth_train_loss = loop_state.get("smooth_train_loss", 0.0)
+    total_training_time = loop_state.get("total_training_time", 0.0)
+    loaded_train_state = meta_data.get("train_state", {}) or {}
+    step = meta_data.get("step", resume_step)
+    print0(f"Resuming from checkpoint step {step:05d} at {checkpoint_dir}")
+else:
+    step = 0
+    min_val_bpb = float("inf")
+    smooth_train_loss = 0.0
+    total_training_time = 0.0
+
+# Reset termination flag on resume; generator will recompute as it advances
+loaded_train_state = loaded_train_state.copy()
+loaded_train_state.pop("last_step", None)
+
+train_state = {
+    "last_step": False,
+    "approx_progress": loaded_train_state.get("approx_progress", 0.0),
+    "current_epoch": loaded_train_state.get("current_epoch", loaded_train_state.get("epoch", 1)),
+    "cursor": loaded_train_state.get("cursor", ddp_rank),
+    "consumed": loaded_train_state.get("consumed", ddp_rank),
+    "epoch": loaded_train_state.get("epoch", 1),
+    "it": loaded_train_state.get("it", 0),
+}
+
+train_loader = sft_data_generator("train", state=train_state)
+build_val_loader = lambda: sft_data_generator(
+    "val", state={"last_step": False, "approx_progress": 0.0, "current_epoch": 1}
+)
+x, y = next(train_loader)  # prefetch first batch
+
+
+def build_meta_data(step_value: int, val_bpb_value):
+    train_state_to_save = {k: v for k, v in train_state.items()}
+    # Avoid carrying termination flag into next run
+    train_state_to_save["last_step"] = False
+    return {
+        "step": step_value,
+        "val_bpb": None if val_bpb_value is None else float(val_bpb_value),
+        "min_val_bpb": float(min_val_bpb),
+        "model_config": model_config_kwargs,
+        "user_config": user_config,
+        "base_checkpoint": {"tag": args.model_tag, "step": base_step},
+        "loop_state": {
+            "smooth_train_loss": float(smooth_train_loss),
+            "total_training_time": float(total_training_time),
+        },
+        "train_state": train_state_to_save,
+    }
+
+# -----------------------------------------------------------------------------
+# Training loop
+# -----------------------------------------------------------------------------
 
 max_steps = args.num_iterations if args.num_iterations > 0 else None
 
@@ -650,6 +730,7 @@ while True:
         with autocast_ctx:
             val_bpb = evaluate_bpb(model, val_loader, eval_steps, token_bytes)
         min_val_bpb = min(min_val_bpb, val_bpb)
+        last_val_bpb = val_bpb
         print0(f"[Eval] step {step:05d} | val bpb: {val_bpb:.4f} | min: {min_val_bpb:.4f}")
         model.train()
 
@@ -720,6 +801,19 @@ while True:
     if done_by_steps or done_by_epoch:
         break
 
+    # Periodic checkpointing (after increment so step matches completed steps)
+    if (not args.dry_run) and args.save_every > 0 and step % args.save_every == 0:
+        meta_data = build_meta_data(step, last_val_bpb)
+        save_checkpoint(
+            checkpoint_dir,
+            step,
+            orig_model.state_dict(),
+            [opt.state_dict() for opt in optimizers],
+            meta_data,
+            rank=ddp_rank,
+        )
+        print0(f"Checkpoint saved to {checkpoint_dir} at step {step:05d}")
+
 # -----------------------------------------------------------------------------
 # Final eval & checkpoint
 # -----------------------------------------------------------------------------
@@ -730,20 +824,10 @@ eval_steps = max(1, args.eval_tokens // (args.device_batch_size * args.max_seq_l
 with autocast_ctx:
     val_bpb = evaluate_bpb(model, val_loader, eval_steps, token_bytes)
 min_val_bpb = min(min_val_bpb, val_bpb)
+last_val_bpb = val_bpb
 print0(f"[Final Eval] step {step:05d} | val bpb: {val_bpb:.4f} | min: {min_val_bpb:.4f}")
 
-meta_data = {
-    "step": step,
-    "val_bpb": float(val_bpb),
-    "min_val_bpb": float(min_val_bpb),
-    "model_config": model_config_kwargs,
-    "user_config": user_config,
-    "base_checkpoint": {"tag": args.model_tag, "step": base_step},
-    "loop_state": {
-        "smooth_train_loss": float(smooth_train_loss),
-        "total_training_time": float(total_training_time),
-    },
-}
+meta_data = build_meta_data(step, val_bpb)
 
 if not args.dry_run:
     save_checkpoint(
