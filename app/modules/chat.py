@@ -1,8 +1,5 @@
 """
-python -m app.modules.chat \
-  --ckpt-relpath base_checkpoints/d32/model_076800.pt \
-  --device
-
+python -m app.modules.chat   --ckpt-relpath sft/d32/model_000843.pt
 """
 import os
 import sys

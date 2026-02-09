@@ -1,7 +1,10 @@
 """
 Simple SFT evaluation: compute validation bits-per-byte (bpb) on the jsonl val mix.
 Usage:
-    python -m app.modules.sft.sft_eval --ckpt-relpath base_checkpoints/d32/model_076800.pt
+
+CUDA_VISIBLE_DEVICES=4,5,6,7 torchrun --standalone --nproc_per_node=4   app/modules/sft/sft_eval.py   --ckpt-relpath sft/d32/model_000837.pt
+
+python -m app.modules.sft.sft_eval --ckpt-relpath sft/d32/model_000837.pt
 """
 
 import os

@@ -4,11 +4,10 @@ identity_conversations.jsonl data (duplicated 2x).
 
 示例：
 1) 默认加载最新 checkpoint 并继续训练一轮（跑满两份 identity 数据）：
-   CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nproc_per_node=2 \
+   CUDA_VISIBLE_DEVICES=4,5,6,7 torchrun --standalone --nproc_per_node=4 \
    app/modules/sft/continue_sft.py \
    --device-type cuda \
-   --run-path d32 \
-   --lrm 0.1
+   --lrm 1.0
 
 2) 单卡冒烟 40 步：
    python app/modules/sft/continue_sft.py --device-type cuda --device-batch-size 2 --total-batch-size 8192 --num-iterations 40 --lrm 0.05
@@ -161,7 +160,7 @@ parser.add_argument("--num-iterations", type=int, default=-1, help="Number of op
 parser.add_argument("--save-every", type=int, default=400, help="Checkpoint every N steps (model + optimizer)")
 # Batch sizes
 parser.add_argument("--max-seq-len", type=int, default=2048, help="Max context length")
-parser.add_argument("--device-batch-size", type=int, default=32, help="Per-device batch size")
+parser.add_argument("--device-batch-size", type=int, default=16, help="Per-device batch size")
 parser.add_argument("--total-batch-size", type=int, default=524288, help="Global tokens per step (B*T*world_size*grad_accum)")
 # Optimization
 parser.add_argument("--embedding-lr", type=float, default=0.3, help="Embedding LR (AdamW)")
@@ -314,6 +313,12 @@ def jsonl_path(filename: str):
 train_tasks: List[Task] = [
     CustomJSON(identity_path),
     CustomJSON(identity_path),  # 2x upsample
+    CustomJSON(identity_path),
+    CustomJSON(identity_path),
+    CustomJSON(identity_path),
+    CustomJSON(identity_path),
+    CustomJSON(identity_path),
+    CustomJSON(identity_path),
 ]
 
 train_dataset = TaskMixture(train_tasks, seed=42)
