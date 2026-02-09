@@ -3,6 +3,7 @@ Simple SFT evaluation: compute validation bits-per-byte (bpb) on the jsonl val m
 Usage:
     python -m app.modules.sft.sft_eval --ckpt-relpath base_checkpoints/d32/model_076800.pt
 """
+
 import os
 import json
 import argparse
@@ -10,6 +11,11 @@ import random
 import re
 import torch
 from contextlib import nullcontext
+import sys
+
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../.."))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 
 from app.modules.utils.utils import compute_init, compute_cleanup, autodetect_device_type, get_base_dir, print0, download_file_with_lock
 from app.modules.utils.checkpoint_manager import build_model, find_last_step

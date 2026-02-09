@@ -3,16 +3,17 @@ Supervised fine-tuning (SFT) for the LLM_pytorch_only project.
 
 示例：
 1) 多卡全量训练一轮（默认 num_iterations=-1 会跑满一轮数据）  
-   CUDA_VISIBLE_DEVICES=4,5,6,7 torchrun --standalone --nproc_per_node=4 \\
-   app/modules/sft/sft.py \\
-     --device-type cuda \\
-     --identity-jsonl app/data/sft/jsonl/identity_conversations.jsonl \\
-     --total-batch-size 524288 --device-batch-size 16
+   CUDA_VISIBLE_DEVICES=4,5,6,7 torchrun --standalone --nproc_per_node=4 \
+  app/modules/sft/sft.py \
+  --device-type cuda \
+  --identity-jsonl app/data/sft/jsonl/identity_conversations.jsonl \
+  --total-batch-size 524288 --device-batch-size 16
+
 
 2) 单卡冒烟跑 20 步：  
    python app/modules/sft/sft.py --device-type cuda --device-batch-size 2 --total-batch-size 8192 --num-iterations 20
 
-3) 每 400 步保存一次并可断点续训：  
+3) 每 400 步保存一次并可断点续训： 
    python app/modules/sft/sft.py --device-type cuda --run-path my_run --save-every 400
    # 中断后恢复  
    python app/modules/sft/sft.py --device-type cuda --run-path my_run --resume
@@ -492,10 +493,11 @@ train_tasks: List[Task] = [
     CustomJSON(jsonl_path("mmlu_auxiliary_train_train.jsonl")),
     CustomJSON(jsonl_path("gsm8k_main_train.jsonl")),
     CustomJSON(jsonl_path("gsm8k_main_train.jsonl")),  # oversample GSM8K 2x
+    CustomJSON(jsonl_path("smol_smoltalk_train.jsonl")),
+    CustomJSON(jsonl_path("identity_conversations.jsonl")),
+    CustomJSON(jsonl_path("identity_conversations.jsonl")),
 ]
-if identity_path is not None and os.path.exists(identity_path):
-    train_tasks.append(CustomJSON(identity_path))
-    train_tasks.append(CustomJSON(identity_path))  # 2 epochs of identity
+
 for extra in args.extra_jsonl:
     extra_path = maybe_path(extra)
     if extra_path is not None:
